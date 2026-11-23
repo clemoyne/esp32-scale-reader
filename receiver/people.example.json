@@ -1,0 +1,7 @@
+{
+  "people": [
+    {"name": "Adult 1", "min_lb": 170},
+    {"name": "Adult 2", "min_lb": 100, "max_lb": 170},
+    {"name": "Child", "max_lb": 100}
+  ]
+}

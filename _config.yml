@@ -1,0 +1,4 @@
+title: ESP32 scale reader
+description: Read a Renpho / QN Bluetooth bathroom scale with a $8 ESP32 and send every weigh-in to a computer in your house.
+theme: jekyll-theme-cayman
+exclude: [firmware, receiver, pi, LICENSE]

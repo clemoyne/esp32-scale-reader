@@ -1,0 +1,5 @@
+firmware/scale_reader/config.h
+people.json
+*.db
+__pycache__/
+.DS_Store

@@ -1,0 +1,20 @@
+# systemd unit for the scale store. Adjust User and the paths, then:
+#   sudo cp scalestore.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now scalestore
+[Unit]
+Description=Bathroom scale store and page, fed by the ESP32 reader
+After=network-online.target
+
+[Service]
+User=pi
+NoNewPrivileges=yes
+ExecStart=/usr/bin/python3 -I /opt/scalestore/scalestore.py --port 8091 --db /var/lib/scalestore/scale.db --people /var/lib/scalestore/people.json
+Restart=always
+RestartSec=10
+ReadWritePaths=/var/lib/scalestore
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

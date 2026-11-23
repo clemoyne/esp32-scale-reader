@@ -1,0 +1,266 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<link rel="icon" href="/favicon.ico?v=2"><link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Scale</title>
+<style>
+:root{--bg:#f6f7f9;--card:#fff;--ink:#1b1f24;--dim:#5d6672;--line:#e2e5ea;--grid:#eef0f3;--w:#2f6fd6;--avg:#d9622b;--ok:#2e8b57;--bad:#c0392b}
+@media (prefers-color-scheme:dark){:root{--bg:#121417;--card:#1b1e23;--ink:#e8eaed;--dim:#9aa3ae;--line:#2c3138;--grid:#23272d;--w:#5b9cf5;--avg:#f0884f;--ok:#4cc38a;--bad:#ef6b5c}}
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+header{padding:16px;max-width:1100px;margin:0 auto;display:flex;flex-wrap:wrap;gap:8px 16px;align-items:baseline}
+h1{font-size:22px;margin:0}
+#summary{color:var(--dim);font-size:13.5px;flex:1 1 300px}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden;background:var(--card)}
+.seg button{font:inherit;font-size:13px;border:0;background:none;color:var(--dim);padding:5px 11px;cursor:pointer}
+.seg button+button{border-left:1px solid var(--line)}
+.seg button.on{background:var(--w);color:#fff}
+.seg button:focus-visible{outline:2px solid var(--avg);outline-offset:-2px}
+main{max-width:1100px;margin:0 auto;padding:0 16px 32px;display:grid;grid-template-columns:minmax(0,1fr);gap:14px}
+.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:14px}
+.tile,.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px;min-width:0}
+.tile .n{font-size:30px;font-weight:650;font-variant-numeric:tabular-nums;white-space:nowrap}
+.tile .n small{font-size:16px;font-weight:500;color:var(--dim);margin-left:2px}
+.tile .n.range{font-size:24px}
+.tile .l{color:var(--dim);font-size:13px}
+h2{font-size:15px;margin:0 0 4px}
+.note{color:var(--dim);font-size:13px;margin:0 0 8px}
+.legend{display:flex;flex-wrap:wrap;gap:14px;font-size:13px;color:var(--dim);margin-bottom:6px}
+.legend i{display:inline-block;width:14px;height:10px;border-radius:2px;margin-right:5px;vertical-align:-1px}
+svg{display:block;width:100%;overflow:visible;touch-action:pan-y}
+svg text{fill:var(--dim);font-size:11px;font-variant-numeric:tabular-nums}
+table{width:100%;border-collapse:collapse;font-size:13.5px;font-variant-numeric:tabular-nums}
+th{text-align:left;color:var(--dim);font-weight:500;border-bottom:1px solid var(--line);padding:4px 6px}
+td{padding:4px 6px;border-bottom:1px solid var(--grid);white-space:nowrap}
+td.num,th.num{text-align:right}
+tr.hidden td{color:var(--dim)} tr.hidden td.w{text-decoration:line-through}
+.scroll{overflow-x:auto;max-height:480px;overflow-y:auto}
+#tip{position:fixed;pointer-events:none;background:var(--ink);color:var(--bg);font-size:12.5px;padding:5px 8px;border-radius:6px;display:none;z-index:5;white-space:pre}
+.empty{color:var(--dim);font-size:13.5px;padding:8px 0}
+.nav{font-size:13px;color:var(--dim)} .nav a{color:var(--dim)}
+button.small{font:inherit;font-size:12.5px;border:1px solid var(--line);background:var(--card);color:var(--ink);border-radius:7px;padding:2px 9px;cursor:pointer}
+button.small:focus-visible{outline:2px solid var(--w);outline-offset:1px}
+.down{color:var(--ok)} .up{color:var(--bad)}
+</style>
+</head>
+<body>
+<header><h1>Scale</h1><div id="summary">Loading…</div>
+  <div class="seg" id="who" role="group" aria-label="Person"></div>
+  <div class="seg" id="units" role="group" aria-label="Weight unit"><button data-unit="lb">lb</button><button data-unit="kg">kg</button></div>
+  <div class="seg" id="period" role="group" aria-label="Period"><button data-days="30">30 days</button><button data-days="90">90 days</button><button data-days="365">Year</button><button data-days="0">All</button></div>
+</header>
+<main>
+  <div class="tiles" id="tiles">
+    <div class="tile"><div class="n" id="t-last">–</div><div class="l" id="t-last-l">Latest</div></div>
+    <div class="tile"><div class="n" id="t-avg">–</div><div class="l" id="t-avg-l">7-day average</div></div>
+    <div class="tile"><div class="n" id="t-change">–</div><div class="l" id="t-change-l">Change over the period</div></div>
+    <div class="tile"><div class="n range" id="t-range">–</div><div class="l">Low and high in the period</div></div>
+  </div>
+  <section class="card" id="chart-card">
+    <h2 id="chart-title">Weight</h2><p class="note" id="chart-note"></p>
+    <div class="legend"><span><i style="background:var(--w)"></i>Reading</span><span><i style="background:var(--avg)"></i>7-day average</span></div>
+    <svg id="chart" height="260" role="img" aria-label="Weight over time"></svg>
+  </section>
+  <section class="card">
+    <h2>Readings</h2>
+    <p class="note" id="table-note"></p>
+    <div class="scroll"><table id="table"></table></div>
+  </section>
+  <p class="note" id="about">Readings come from an ESP32 next to the bathroom scale: it connects over Bluetooth when the scale wakes and sends each stable weight here. They're kept in a database by the scale store.</p>
+</main>
+<div id="tip"></div>
+<script>
+const $ = id => document.getElementById(id);
+const SVG = "http://www.w3.org/2000/svg";
+const el = (tag, attrs, ...kids) => { const n = document.createElement(tag); for (const [k, v] of Object.entries(attrs || {})) n.setAttribute(k, v); n.append(...kids.filter(k => k !== null && k !== undefined)); return n; };
+const sv = (tag, attrs) => { const n = document.createElementNS(SVG, tag); for (const [k, v] of Object.entries(attrs)) n.setAttribute(k, v); return n; };
+const LB = 2.2046226218, DAY = 86400, AVG_DAYS = 7;
+const ago = s => s < 90 ? `${Math.round(s)} s ago` : s < 5400 ? `${Math.round(s / 60)} min ago` : s < 172800 ? `${Math.round(s / 3600)} h ago` : `${Math.round(s / 86400)} days ago`;
+const hm = t => new Date(t * 1000).toLocaleTimeString([], {hour: "numeric", minute: "2-digit"});
+const dayName = t => new Date(t * 1000).toLocaleDateString([], {weekday: "short", month: "short", day: "numeric"});
+const fullDay = t => new Date(t * 1000).toLocaleDateString([], {weekday: "short", year: "numeric", month: "short", day: "numeric"});
+
+// Stored in kg; shown in the unit picked here, remembered in this browser
+let unit = "lb", days = 90, who = null;  // who: a person's name, or "*" for everyone
+try { who = localStorage.getItem("scale-person"); } catch (e) {}
+try { if (localStorage.getItem("scale-unit") === "kg") unit = "kg"; } catch (e) {}
+try { const d = localStorage.getItem("scale-days"); if (d !== null && [30, 90, 365, 0].includes(+d)) days = +d; } catch (e) {}
+const conv = kg => unit === "lb" ? kg * LB : kg;
+const w = kg => kg === null || kg === undefined ? "–" : conv(kg).toFixed(1);
+const signed = kg => { const v = conv(kg); return `${v > 0 ? "+" : v < 0 ? "−" : "±"}${Math.abs(v).toFixed(1)}`; };
+
+function tip(e, text) { const t = $("tip"); t.textContent = text; t.style.display = "block"; t.style.left = Math.min(e.clientX + 12, innerWidth - t.offsetWidth - 8) + "px"; t.style.top = (e.clientY - t.offsetHeight - 10) + "px"; }
+function hideTip() { $("tip").style.display = "none"; }
+
+// Average of the readings in the AVG_DAYS up to and including each one
+function rolling(rows) {
+  const out = []; let a = 0, sum = 0;
+  rows.forEach((r, i) => {
+    sum += r.kg;
+    while (r.t - rows[a].t > AVG_DAYS * DAY) sum -= rows[a++].kg;
+    out.push({t: r.t, v: sum / (i - a + 1)});
+  });
+  return out;
+}
+function avgBetween(rows, t0, t1) {
+  const sel = rows.filter(r => r.t > t0 && r.t <= t1);
+  return sel.length ? sel.reduce((s, r) => s + r.kg, 0) / sel.length : null;
+}
+
+function chart(svg, rows, avg) {
+  svg.replaceChildren();
+  const W = svg.clientWidth || 700, H = +svg.getAttribute("height"), L = 44, R = 8, T = 8, B = 22;
+  if (!rows.length) { const t = sv("text", {x: L, y: H / 2}); t.textContent = "No readings in this period yet."; svg.append(t); return; }
+  const vals = rows.map(r => conv(r.kg));
+  let lo = Math.min(...vals), hi = Math.max(...vals);
+  if (hi - lo < 4) { const mid = (hi + lo) / 2; lo = mid - 2; hi = mid + 2; }
+  const span = hi - lo, step = [0.5, 1, 2, 5, 10, 20].find(s => span / s <= 6) || 50;
+  lo = Math.floor(lo / step) * step; hi = Math.ceil(hi / step) * step;
+  let t0 = rows[0].t, t1 = rows[rows.length - 1].t;
+  if (t1 - t0 < DAY) { t0 -= DAY / 2; t1 += DAY / 2; }
+  const x = t => L + (W - L - R) * (t - t0) / (t1 - t0), y = v => T + (H - T - B) * (1 - (v - lo) / (hi - lo));
+  for (let v = lo; v <= hi + 1e-9; v += step) {
+    svg.append(sv("line", {x1: L, x2: W - R, y1: y(v), y2: y(v), stroke: "var(--grid)"}));
+    const t = sv("text", {x: L - 6, y: y(v) + 4, "text-anchor": "end"}); t.textContent = `${Math.round(v * 10) / 10}`; svg.append(t);
+  }
+  const labels = Math.max(2, Math.floor((W - L) / 110));
+  for (let i = 0; i <= labels; i++) {
+    const t = t0 + (t1 - t0) * i / labels, text = sv("text", {x: x(t), y: H - 5, "text-anchor": i === 0 ? "start" : i === labels ? "end" : "middle"});
+    text.textContent = dayName(t); svg.append(text);
+  }
+  if (avg.length > 1) svg.append(sv("polyline", {points: avg.map(p => `${x(p.t)},${y(conv(p.v))}`).join(" "), fill: "none", stroke: "var(--avg)", "stroke-width": 2, "stroke-linejoin": "round"}));
+  svg.append(sv("path", {d: rows.map(r => `M${x(r.t).toFixed(1)} ${y(conv(r.kg)).toFixed(1)}h0`).join(""), stroke: "var(--w)", "stroke-width": rows.length > 200 ? 4 : 6, "stroke-linecap": "round"}));
+  const cross = sv("line", {y1: T, y2: H - B, stroke: "var(--dim)", visibility: "hidden"});
+  const dot = sv("circle", {r: 5, fill: "var(--w)", stroke: "var(--card)", "stroke-width": 2, visibility: "hidden"});
+  const hit = sv("rect", {x: L, y: T, width: W - L - R, height: H - T - B, fill: "transparent"});
+  svg.append(cross, dot, hit);
+  const move = e => {
+    const box = svg.getBoundingClientRect(), t = t0 + (e.clientX - box.left - L) / (W - L - R) * (t1 - t0);
+    let best = 0;
+    rows.forEach((r, i) => { if (Math.abs(r.t - t) < Math.abs(rows[best].t - t)) best = i; });
+    const r = rows[best], cx = x(r.t);
+    cross.setAttribute("x1", cx); cross.setAttribute("x2", cx); cross.setAttribute("visibility", "visible");
+    dot.setAttribute("cx", cx); dot.setAttribute("cy", y(conv(r.kg))); dot.setAttribute("visibility", "visible");
+    tip(e, `${dayName(r.t)} ${hm(r.t)}\n${w(r.kg)} ${unit}\n7-day average ${w(avg[best].v)} ${unit}`);
+  };
+  hit.addEventListener("pointermove", move);
+  hit.addEventListener("pointerdown", move);
+  hit.addEventListener("pointerleave", () => { cross.setAttribute("visibility", "hidden"); dot.setAttribute("visibility", "hidden"); hideTip(); });
+}
+
+async function setHidden(id, hidden, btn) {
+  btn.disabled = true;
+  try {
+    const r = await fetch("api/hide", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({id, hidden})});
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.status);
+  } catch (e) { btn.disabled = false; btn.textContent = "Failed, retry"; return; }
+  refresh();
+}
+
+let data = null;
+async function refresh() {
+  try {
+    // Fetch AVG_DAYS more than shown, so the average starts right at the period's start
+    const q = days ? `?days=${days + AVG_DAYS}` : "";
+    data = await fetch(`api/readings${q}`, {cache: "no-store"}).then(r => r.json());
+  } catch (e) { $("summary").textContent = "Can't reach the scale store."; return; }
+  render();
+}
+
+// One button per person in the store's ranges, plus Everyone
+const rangeText = p => p.min_lb !== null && p.max_lb !== null ? `${p.min_lb}–${p.max_lb} lb` : p.min_lb !== null ? `${p.min_lb} lb and up` : p.max_lb !== null ? `under ${p.max_lb} lb` : "any weight";
+function buildWho(people) {
+  const names = people.map(p => p.name);
+  if (who !== "*" && !names.includes(who)) who = names[0] || "*";
+  const key = JSON.stringify(people);
+  const box = $("who");
+  if (box.dataset.key !== key) {
+    box.dataset.key = key;
+    box.replaceChildren(...people.map(p => el("button", {"data-who": p.name, title: `Readings ${rangeText(p)}`}, p.name)),
+      el("button", {"data-who": "*", title: "Every reading, with whose it is"}, "Everyone"));
+  }
+  box.querySelectorAll("button").forEach(b => b.classList.toggle("on", b.dataset.who === who));
+}
+$("who").addEventListener("click", e => {
+  const b = e.target.closest("button"); if (!b) return;
+  who = b.dataset.who; try { localStorage.setItem("scale-person", who); } catch (err) {}
+  render();
+});
+
+function render() {
+  if (!data) return;
+  buildWho(data.people);
+  const everyone = who === "*", person = data.people.find(p => p.name === who);
+  const now = data.now, start = days ? now - days * DAY : -Infinity;
+  const all = everyone ? data.readings : data.readings.filter(r => r.person === who), shown = all.filter(r => !r.hidden);
+  $("tiles").hidden = everyone; $("chart-card").hidden = everyone;
+  $("chart-title").textContent = person ? `${person.name}'s weight` : "Weight";
+  $("table-note").textContent = everyone
+    ? `Newest first, everyone's. Each reading belongs to whoever's range it falls in: ${data.people.map(p => `${p.name} ${rangeText(p)}`).join(", ")}.${data.readings.some(r => r.person === null) ? " Readings in nobody's range show as –." : ""}`
+    : `Newest first, ${person ? `readings of ${rangeText(person)}` : ""}. Hide one that wasn't ${person ? person.name : "them"} (a guest, a bag on the scale): it stays in the database but leaves the chart and the numbers above, and Show brings it back.`;
+  const avgAll = rolling(shown);
+  const inPeriod = shown.map((r, i) => [r, avgAll[i]]).filter(([r]) => r.t >= start);
+  const rows = inPeriod.map(([r]) => r), avg = inPeriod.map(([, a]) => a);
+  const last = shown[shown.length - 1];
+
+  const whom = everyone ? "" : `${who}: `;
+  $("summary").textContent = last ? `${whom}last weighed ${ago(now - last.t)} · ${shown.length.toLocaleString()} reading${shown.length === 1 ? "" : "s"} loaded` : `${whom}no readings yet. Step on the scale and wait for the ESP32's light to flash three times.`;
+  $("t-last").replaceChildren(last ? w(last.kg) : "–", el("small", null, unit));
+  $("t-last-l").textContent = last ? `Latest, ${dayName(last.t)} ${hm(last.t)}` : "Latest";
+
+  const wk = avgBetween(shown, now - AVG_DAYS * DAY, now), prev = avgBetween(shown, now - 2 * AVG_DAYS * DAY, now - AVG_DAYS * DAY);
+  $("t-avg").replaceChildren(wk === null ? "–" : w(wk), el("small", null, unit));
+  $("t-avg-l").textContent = wk !== null && prev !== null ? `7-day average, ${signed(wk - prev)} ${unit} on the week before` : "7-day average (last 7 days)";
+
+  const change = avg.length > 1 ? avg[avg.length - 1].v - avg[0].v : null;
+  $("t-change").replaceChildren(change === null ? "–" : signed(change), el("small", null, unit));
+  $("t-change").className = "n" + (change === null || Math.abs(conv(change)) < 0.05 ? "" : change < 0 ? " down" : " up");
+  $("t-change-l").textContent = change === null ? "Change over the period" : `Change in the 7-day average since ${dayName(avg[0].t)}`;
+
+  if (rows.length) {
+    const lo = Math.min(...rows.map(r => r.kg)), hi = Math.max(...rows.map(r => r.kg));
+    $("t-range").replaceChildren(`${w(lo)} / ${w(hi)}`, el("small", null, unit));
+  } else $("t-range").replaceChildren("–");
+
+  const period = {30: "last 30 days", 90: "last 90 days", 365: "last year", 0: "all readings"}[days];
+  $("chart-note").textContent = `${unit === "lb" ? "Pounds" : "Kilograms"}, ${period}: each reading, and the average of the ${AVG_DAYS} days up to it, which smooths out day-to-day swings from water and meals.`;
+  chart($("chart"), rows, avg);
+
+  // Table: every reading in the period, hidden ones too, newest first
+  const list = all.filter(r => r.t >= start).slice().reverse();
+  const cols = ["Day", "Time", ...(everyone ? ["Person"] : []), "Weight", "Change", "Signal", ""];
+  const head = el("tr", null, ...cols.map(h => el("th", ["Weight", "Change", "Signal"].includes(h) ? {class: "num"} : null, h)));
+  const body = list.map(r => {
+    // Change from the same person's previous reading
+    const mine = everyone ? shown.filter(x => x.person === r.person) : shown, i = mine.indexOf(r), before = i > 0 ? mine[i - 1] : null;
+    const btn = el("button", {class: "small", type: "button"}, r.hidden ? "Show" : "Hide");
+    btn.addEventListener("click", () => setHidden(r.id, !r.hidden, btn));
+    const ch = !r.hidden && before ? r.kg - before.kg : null;
+    return el("tr", r.hidden ? {class: "hidden"} : null,
+      el("td", null, fullDay(r.t)), el("td", null, hm(r.t)),
+      ...(everyone ? [el("td", null, r.person === null ? "–" : r.person)] : []),
+      el("td", {class: "num w"}, `${w(r.kg)} ${unit}`),
+      el("td", {class: "num"}, ch === null ? "" : `${signed(ch)}`),
+      el("td", {class: "num"}, r.rssi === null ? "–" : `${r.rssi} dBm`),
+      el("td", null, btn));
+  });
+  $("table").replaceChildren(...(body.length ? [head, ...body] : [el("tr", null, el("td", {class: "empty"}, "No readings in this period."))]));
+}
+
+function seg(id, attr, current, set) {
+  const box = $(id);
+  const mark = () => box.querySelectorAll("button").forEach(b => b.classList.toggle("on", b.dataset[attr] === String(current())));
+  box.addEventListener("click", e => { const b = e.target.closest("button"); if (!b) return; set(b.dataset[attr]); mark(); });
+  mark();
+}
+seg("units", "unit", () => unit, v => { unit = v; try { localStorage.setItem("scale-unit", v); } catch (e) {} render(); });
+seg("period", "days", () => days, v => { days = +v; try { localStorage.setItem("scale-days", v); } catch (e) {} refresh(); });
+addEventListener("resize", () => { clearTimeout(window._rs); window._rs = setTimeout(render, 150); });
+refresh();
+setInterval(refresh, 60000);
+</script>
+</body>
+</html>
