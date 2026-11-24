@@ -1,8 +1,9 @@
 // ESP32 reader for a Renpho / QN bathroom scale.
 //
-// Scans for the scale, connects when it wakes, does the same handshake as
-// pi/scale_weight.py (config to FFE3, time to FFE4), and POSTs each stable
-// weight as JSON to REPORT_HOST:REPORT_PORT/REPORT_PATH over Wi-Fi.
+// Scans for the scale, connects when it wakes, does the handshake (as
+// openScale's QN driver: config to FFE3 and time to FFE4 on the scale's 0x12,
+// then 0x20 + time to FFE3 on its 0x14), and POSTs each stable weight as JSON
+// to REPORT_HOST:REPORT_PORT/REPORT_PATH over Wi-Fi.
 // Readings that can't be sent yet are kept in RAM and retried.
 //
 // http://<HOSTNAME>.local/ shows status and the recent log (including the
@@ -25,6 +26,17 @@
 
 #include "config.h"
 #include "scale_types.h"
+
+// The reader stays connected while the scale is in use: a weigh-in that
+// starts while connected always arrives, one that wakes the scale before the
+// link is up may not. But the scale doesn't sleep while a link is up (it held
+// one for 48 min), so after IDLE_S with no weigh-in the reader disconnects and
+// waits for the scale to wake (or to go quiet and come back) before
+// reconnecting. Once the handshake is done the scale may skip link events
+// while idle (latency 20), to spare its batteries meanwhile.
+#ifndef IDLE_S
+#define IDLE_S 600
+#endif
 
 #ifndef LED_PIN
 #define LED_PIN 2
@@ -172,8 +184,9 @@ static uint32_t reportIpAtMs = 0;
 
 static const float LB_PER_KG = 2.2046226218f;
 
-static void queueReading(float kg, int rssi) {
-  Reading r = {kg, millis(), timeValid() ? time(nullptr) : 0, rssi};
+// epoch: when it was measured, if known (a stored record), else now.
+static void queueReading(float kg, int rssi, time_t epoch = 0) {
+  Reading r = {kg, millis(), epoch ? epoch : timeValid() ? time(nullptr) : 0, rssi};
   lastReading = r;
   haveLastReading = true;
   if (pendingCount == MAX_PENDING) {  // drop the oldest
@@ -262,8 +275,27 @@ static NimBLEAddress wantedAddr;
 static volatile int lastAdvRssi = 0;
 static volatile uint32_t lastAdvMs = 0;
 static volatile uint32_t advCount = 0;
-static volatile uint32_t cooldownUntilMs = 0;
+// false after an idle disconnect: the scale is advertising slowly, not in use.
+static volatile bool armed = true;
+static volatile uint32_t disarmedAtMs = 0;
+// Advert rate: about one a second while the scale idles, several a second
+// once someone steps on. WAKE_ADVERTS within WAKE_WINDOW_MS re-arms.
+static const int WAKE_ADVERTS = 5;
+static const uint32_t WAKE_WINDOW_MS = 2000;
+static const uint32_t QUIET_MS = 15000;  // or this long with none: it slept
+static uint32_t advTimes[WAKE_ADVERTS];  // BLE task only
+static int advTimeIdx = 0;
+static volatile bool wokeRearm = false;  // for loop() to log
 static String targetAddr;  // lower case, or "" to match by name
+
+// The scale's advertisement, to see what changes when it wakes (it advertises
+// while asleep too). Written by the BLE task, logged by loop() when it changes.
+static portMUX_TYPE advMux = portMUX_INITIALIZER_UNLOCKED;
+static uint8_t advBytes[62];
+static uint8_t advLen = 0;
+static uint8_t advType = 0;
+static bool advConnectable = false;
+static volatile bool advChanged = false;
 
 static QueueHandle_t packets;
 
@@ -271,13 +303,18 @@ static QueueHandle_t packets;
 static uint32_t sessionStartMs = 0;
 static uint32_t stableAtMs = 0;
 static uint32_t lastSettleLogMs = 0;
-static bool closing = false;
+static bool canTake = true;  // false after a stable reading, until the weight changes
+static float lastKg = 0;
 static bool cfgSent = false;
 static bool timeSent = false;
 static float weightDiv = 100.0f;
 static int sessionRssi = 0;
 static uint32_t connectFailures = 0;
 static uint32_t sessions = 0;
+static uint8_t protoType = 0x15;  // byte 2 of the scale's packets; echoed in ours
+static uint32_t activeAtMs = 0;    // handshake or the last weight frame
+static uint32_t paramsAtMs = 0;    // when the slower link was asked for (0: not yet)
+static bool paramsLogged = false;
 
 class ScanCallbacks : public NimBLEScanCallbacks {
   void onResult(const NimBLEAdvertisedDevice* dev) override {
@@ -289,10 +326,32 @@ class ScanCallbacks : public NimBLEScanCallbacks {
     }
     if (!match) return;
     lastAdvRssi = dev->getRSSI();
-    lastAdvMs = millis();
+    uint32_t nowMs = millis();
+    lastAdvMs = nowMs;
     advCount = advCount + 1;
-    if (state != SCANNING || connectWanted) return;
-    if ((int32_t)(millis() - cooldownUntilMs) < 0) return;
+    uint32_t oldest = advTimes[advTimeIdx];  // the WAKE_ADVERTS-th most recent before this one
+    advTimes[advTimeIdx] = nowMs;
+    advTimeIdx = (advTimeIdx + 1) % WAKE_ADVERTS;
+    if (!armed && oldest && nowMs - oldest < WAKE_WINDOW_MS && nowMs - disarmedAtMs > 10000) {
+      armed = true;
+      wokeRearm = true;
+    }
+    {
+      const std::vector<uint8_t>& pl = dev->getPayload();
+      uint8_t n = pl.size() > sizeof advBytes ? sizeof advBytes : pl.size();
+      uint8_t t = dev->getAdvType();
+      bool c = dev->isConnectable();
+      portENTER_CRITICAL(&advMux);
+      if (n != advLen || t != advType || c != advConnectable || memcmp(advBytes, pl.data(), n) != 0) {
+        memcpy(advBytes, pl.data(), n);
+        advLen = n;
+        advType = t;
+        advConnectable = c;
+        advChanged = true;
+      }
+      portEXIT_CRITICAL(&advMux);
+    }
+    if (state != SCANNING || connectWanted || !armed) return;
     wantedAddr = dev->getAddress();
     connectWanted = true;
   }
@@ -375,9 +434,12 @@ static void connectToScale() {
   sessionRssi = lastAdvRssi;
   logf("connected in %lu ms", (unsigned long)(millis() - t0));
   chrConfig = chrTime = nullptr;
-  cfgSent = timeSent = closing = false;
+  cfgSent = timeSent = paramsLogged = false;
+  paramsAtMs = 0;
   weightDiv = 100.0f;
   stableAtMs = 0;
+  canTake = true;
+  lastKg = 0;
   lastSettleLogMs = 0;
   if (!setupSession()) {
     logf("handshake setup failed, disconnecting");
@@ -392,6 +454,27 @@ static void connectToScale() {
   connectWanted = false;
 }
 
+static const uint32_t QN_EPOCH = 946684800;  // the scale counts seconds from 2000-01-01 UTC
+
+static uint32_t scaleNow() { return timeValid() ? (uint32_t)(time(nullptr) - QN_EPOCH) : 0; }
+
+// Writes v with its last byte set to the sum of the others.
+static void writeSummed(NimBLERemoteCharacteristic* c, uint8_t* v, size_t n) {
+  uint8_t sum = 0;
+  for (size_t i = 0; i + 1 < n; i++) sum += v[i];
+  v[n - 1] = sum;
+  writeChr(c, v, n);
+}
+
+static void takeWeight(float kg, time_t epoch, const char* how) {
+  logf("WEIGHT %.2f kg = %.1f lb %s", kg, kg * LB_PER_KG, how);
+  stableAtMs = millis();
+  canTake = false;
+  lastKg = kg;
+  setLed(LED_DONE);
+  queueReading(kg, sessionRssi, epoch);
+}
+
 static void handlePacket(const Packet& p) {
   const uint8_t* d = p.data;
   char h[70];
@@ -400,15 +483,18 @@ static void handlePacket(const Packet& p) {
   uint8_t kind = d[0];
 
   if (kind == 0x10 && p.len > 5) {
+    activeAtMs = millis();
     float kg = ((d[3] << 8) | d[4]) / weightDiv;
     bool stable = d[5] == 1;
-    if (stable && !stableAtMs) {
+    // A new weigh-in on the same link: settling frames come first, and the
+    // scale may repeat the locked weight, so a repeat of it soon after is skipped.
+    if (stable && canTake && !(stableAtMs && fabsf(kg - lastKg) < 0.2f && millis() - stableAtMs < 15000)) {
       logf("notify %s", h);
-      logf("WEIGHT %.2f kg = %.1f lb STABLE", kg, kg * LB_PER_KG);
-      stableAtMs = millis();
-      setLed(LED_DONE);
-      queueReading(kg, sessionRssi);
-    } else if (!stable && millis() - lastSettleLogMs > 1000) {
+      takeWeight(kg, 0, "STABLE");
+    } else if (!stable) {
+      if (stableAtMs && kg > 0) canTake = true;
+    }
+    if (!stable && millis() - lastSettleLogMs > 1000) {
       lastSettleLogMs = millis();
       logf("weight %.2f kg (settling)", kg);
     }
@@ -417,28 +503,34 @@ static void handlePacket(const Packet& p) {
 
   logf("notify %s", h);
   if (kind == 0x12 && p.len > 10) {
+    // As openScale's QN driver: config and time together, echoing the protocol type.
+    protoType = d[2];
     weightDiv = d[10] == 1 ? 100.0f : 10.0f;
     if (chrConfig && !cfgSent) {
-      uint8_t cfg[9] = {0x13, 0x09, 0x15, (uint8_t)(DISPLAY_UNIT_LB ? 0x02 : 0x01),
-                        0x10, 0x00, 0x00, 0x00, 0x00};
-      uint8_t sum = 0;
-      for (int i = 0; i < 8; i++) sum += cfg[i];
-      cfg[8] = sum;
+      uint8_t cfg[9] = {0x13, 0x09, protoType, (uint8_t)(DISPLAY_UNIT_LB ? 0x02 : 0x01), 0x10, 0, 0, 0, 0};
       cfgSent = true;
-      writeChr(chrConfig, cfg, sizeof cfg);
-      if (!chrTime) {  // FFF0 variant: no time step, so this ends the handshake
-        logf("handshake done, step on now");
-        setLed(LED_READY);
+      writeSummed(chrConfig, cfg, sizeof cfg);
+      if (chrTime) {
+        uint32_t secs = scaleNow();
+        uint8_t t[5] = {0x02, (uint8_t)secs, (uint8_t)(secs >> 8), (uint8_t)(secs >> 16), (uint8_t)(secs >> 24)};
+        writeChr(chrTime, t, sizeof t);
       }
     }
-  } else if (kind == 0x14 && chrTime && !timeSent) {
-    // Seconds since 2000-01-01 UTC, as pi/scale_weight.py sends.
-    uint32_t secs = timeValid() ? (uint32_t)(time(nullptr) - 946684800) : 0;
-    uint8_t t[5] = {0x02, (uint8_t)secs, (uint8_t)(secs >> 8), (uint8_t)(secs >> 16),
-                    (uint8_t)(secs >> 24)};
+  } else if (kind == 0x14 && !timeSent && chrConfig) {
+    uint32_t secs = scaleNow();
+    uint8_t t[8] = {0x20, 0x08, protoType, (uint8_t)secs, (uint8_t)(secs >> 8), (uint8_t)(secs >> 16),
+                    (uint8_t)(secs >> 24), 0};
     timeSent = true;
-    writeChr(chrTime, t, sizeof t);
+    writeSummed(chrConfig, t, sizeof t);
     logf("handshake done, step on now");
+    activeAtMs = millis();
+    // A 1 s interval lost the locked weight among the queued frames. Instead
+    // keep a 30-50 ms interval but let the scale skip up to 20 events while
+    // it has nothing to send (peripheral latency): idle it wakes about once a
+    // second, yet a weigh-in still streams at full speed. Units 1.25 ms;
+    // timeout in 10 ms (must exceed 2 x 21 x interval).
+    paramsAtMs = millis();
+    if (!client->updateConnParams(24, 40, 20, 600)) logf("couldn't ask for a lighter link");
     if (!stableAtMs) setLed(LED_READY);
   }
 }
@@ -448,22 +540,37 @@ static void runSession() {
   while (xQueueReceive(packets, &p, 0) == pdTRUE) handlePacket(p);
 
   if (!client->isConnected()) {
-    if (!closing) logf("link dropped after %lu s", (unsigned long)((millis() - sessionStartMs) / 1000));
-    else logf("disconnected");
+    logf("link dropped after %lu s", (unsigned long)((millis() - sessionStartMs) / 1000));
     if (ledMode != LED_DONE) setLed(LED_OFF);
     state = SCANNING;
     return;
   }
-  if (closing) return;
-  if (stableAtMs && millis() - stableAtMs > 2000) {
-    closing = true;
-    cooldownUntilMs = millis() + COOLDOWN_S * 1000UL;
+  // After a reading's three flashes the LED goes back to solid: step on.
+  if (timeSent && ledMode == LED_OFF) setLed(LED_READY);
+  if (paramsAtMs && !paramsLogged && millis() - paramsAtMs > 5000) {
+    paramsLogged = true;
+    NimBLEConnInfo ci = client->getConnInfo();
+    logf("link interval %.1f ms, latency %u, timeout %u ms", ci.getConnInterval() * 1.25f,
+         ci.getConnLatency(), ci.getConnTimeout() * 10);
+  }
+  if (armed && timeSent && millis() - activeAtMs > IDLE_S * 1000UL) {
+    logf("no weigh-in in %d min, disconnecting so the scale can sleep", IDLE_S / 60);
+    armed = false;
+    disarmedAtMs = millis();
     client->disconnect();
-  } else if (millis() - sessionStartMs > SESSION_MAX_S * 1000UL) {
-    logf("no stable weight in %d s, giving up", SESSION_MAX_S);
-    closing = true;
-    cooldownUntilMs = millis() + 10000;
-    client->disconnect();
+    // The next pass sees the link down and goes back to scanning.
+  }
+}
+
+// After an idle disconnect, reconnect once the scale has been quiet (it
+// slept, so its next advert is a wake-up).
+static void checkRearm() {
+  if (armed) return;
+  uint32_t heard = lastAdvMs, since = disarmedAtMs;
+  if ((int32_t)(heard - since) > 0) since = heard;
+  if ((int32_t)(millis() - since) >= (int32_t)QUIET_MS) {
+    armed = true;
+    logf("scale quiet for %lu s, ready for the next weigh-in", (unsigned long)(QUIET_MS / 1000));
   }
 }
 
@@ -486,7 +593,8 @@ static void handleStatus() {
            WiFi.localIP().toString().c_str());
   s += line;
   snprintf(line, sizeof line, "state %s  sessions %lu  connect failures %lu\n",
-           state == SCANNING ? "scanning" : "connected", (unsigned long)sessions,
+           state != SCANNING ? "connected" : armed ? "scanning, ready" : "scanning, waiting for the scale to wake",
+           (unsigned long)sessions,
            (unsigned long)connectFailures);
   s += line;
   if (lastAdvMs) {
@@ -612,11 +720,28 @@ void loop() {
   }
   if (otaActive) return;
 
-  // Note the scale's signal now and then, to help place the board.
+  // Note the scale's signal and advert rate now and then, to help place the
+  // board and to see whether the rate changes when the scale wakes.
+  static uint32_t advCountLogged = 0;
   if (lastAdvMs && lastAdvMs != lastAdvLogged && millis() - lastAdvLogged > 10000 &&
       state == SCANNING && !connectWanted) {
+    uint32_t secs = (millis() - lastAdvLogged) / 1000;
+    uint32_t n = advCount - advCountLogged;
     lastAdvLogged = lastAdvMs;
-    logf("scale heard at %d dBm", lastAdvRssi);
+    advCountLogged = advCount;
+    logf("scale heard at %d dBm, %lu adverts in %lu s", lastAdvRssi, (unsigned long)n, (unsigned long)secs);
+  }
+  if (advChanged) {
+    uint8_t b[62], n, t;
+    bool c;
+    portENTER_CRITICAL(&advMux);
+    n = advLen; t = advType; c = advConnectable;
+    memcpy(b, advBytes, n);
+    advChanged = false;
+    portEXIT_CRITICAL(&advMux);
+    char h[130];
+    hex(b, n, h, sizeof h);
+    logf("adv type %u%s: %s", t, c ? " conn" : "", h);
   }
 
   if (state == SCANNING) {
@@ -624,11 +749,16 @@ void loop() {
       lastAdvLogged = millis();
       connectToScale();
     } else {
-      postPending();
+      checkRearm();
+      if (wokeRearm) {
+        wokeRearm = false;
+        logf("scale woke (fast adverts), connecting");
+      }
       startScan();
     }
   } else {
     runSession();
   }
+  postPending();
   delay(5);
 }

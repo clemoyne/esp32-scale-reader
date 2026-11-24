@@ -31,7 +31,5 @@
 // BLE link. Linux BlueZ's default 420 ms supervision timeout dropped the handshake.
 #define SUPERVISION_TIMEOUT_MS 4000
 #define CONNECT_TIMEOUT_MS 5000
-// Give up on a session with no stable weight after this long.
-#define SESSION_MAX_S 120
-// After a reading, ignore the scale's adverts for this long.
-#define COOLDOWN_S 60
+// Disconnect after this long with no weigh-in, so the scale can sleep.
+#define IDLE_S 600

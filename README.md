@@ -64,16 +64,32 @@ Reverse-engineered by [openScale](https://github.com/oliexdev/openScale)
 | `FFE3` (write) | Config: `13 09 15 UU 10 00 00 00 CS`. `UU` is the display unit (`01` kg, `02` lb), `CS` the byte sum |
 | `FFE4` (write) | Time: `02` + seconds since 2000-01-01 UTC, 32-bit little-endian |
 
-1. After you subscribe, the scale sends `12 …` (info; byte 10 = `01` means weights are in 0.01 kg). Reply with the config.
-2. It sends `14 …`. Reply with the time. The handshake is done.
+1. After you subscribe, the scale sends `12 …` (info; byte 2 is the protocol type, `15` here; byte 10 = `01` means weights are in 0.01 kg). Reply with the config on `FFE3` and the time on `FFE4`.
+2. It sends `14 …`. Reply on `FFE3` with `20 08 15` + the same 4 time bytes + the byte sum. The handshake is done.
 3. While someone stands on it, it sends `10 0b 15 HH LL SS …`: weight = `0xHHLL` / 100 kg, and `SS` = `01` once the reading locks. Weights are always kg, whatever the display shows.
 
 Example: `10 0b 15 1f 40 01 …` → 0x1F40 = 8000 → 80.00 kg = 176.4 lb, locked.
 
-Timing matters: the scale stops measuring once the number locks, so the
-reader has to be connected and through the handshake before you step on.
-The ESP32 is quick enough that tapping the scale and then stepping on works;
-its LED tells you when it's ready.
+Things learned the hard way:
+
+- **Be connected before the weigh-in starts.** A weigh-in that begins while
+  the reader is connected always arrives. One that wakes the scale arrives
+  only if the reader connects and finishes the handshake within a couple of
+  seconds; the ESP32 usually manages that.
+- **Only stepping on wakes it** (tapping doesn't, on this model). It then
+  keeps advertising, slowly, for about 20 minutes, with the display dark.
+- **It drops the link itself** a few seconds after a reading, so the reader
+  reconnects straight away, ready for the next person.
+- **It doesn't sleep while something stays connected** (it held a link for
+  48 minutes). So after 10 minutes with no weigh-in the reader disconnects,
+  and ignores the slow adverts until the scale wakes: stepping on makes it
+  advertise several times a second instead of about once.
+- **Don't slow the link to save its battery.** A 1 s connection interval lost
+  the locked weight among queued updates. A 30–50 ms interval with
+  *peripheral latency* 20 (the scale may skip events while it has nothing to
+  say) works: about one wake a second when idle, full speed during a weigh-in.
+- openScale also asks some QN models for a stored record (`22 …`); this one
+  never answered, so the reader doesn't.
 
 ## Flash the ESP32
 
@@ -107,15 +123,23 @@ Module" and the "Minimal SPIFFS" partition scheme.
 | `DISPLAY_UNIT_LB` | `1` sets the scale's display to pounds, `0` to kg |
 | `REPORT_HOST`, `REPORT_PORT`, `REPORT_PATH` | Where readings are POSTed. `.local` names are looked up with mDNS |
 | `TIMEZONE` | A POSIX TZ string, for the log's timestamps |
-| `SUPERVISION_TIMEOUT_MS` | 4000. The link is dropped if the scale goes quiet this long |
+| `SUPERVISION_TIMEOUT_MS` | 4000. The link is dropped if the scale goes quiet this long (6 s once the handshake is done) |
+| `IDLE_S` | 600. Disconnect after this long with no weigh-in, so the scale can sleep |
 
 ## Using it
 
 Put the board within a couple of metres of the scale and plug it in. Then:
 
-1. Tap the scale to wake it. The board's LED blinks fast while it connects.
-2. When the LED stays **on**, step on.
-3. When the weight locks, the LED flashes **three times** and the reading is sent.
+Just step on. When the weight locks, the board's LED flashes **three times**
+and the reading is sent.
+
+| LED | Meaning |
+|---|---|
+| Two flashes | Starting up |
+| Fast blink | Connecting to the scale |
+| **On** | Connected and ready: step on |
+| Three slow flashes | Reading taken (then back on, for the next person) |
+| Off | Not connected: the scale is asleep or idle; stepping on wakes it |
 
 (The red LED on most boards is just power; the one that blinks is on GPIO 2.
 Change `LED_PIN` in `config.h` if yours is elsewhere.)
@@ -260,7 +284,7 @@ the supervision-timeout setting that made it reliable. From another room, use th
 - **Serial monitor shows garbage on a Mac** (a flood of `00 80` bytes): seen with a CP2102 board. Flashing still works; use the status page instead of the serial log.
 - **Wireless upload says "No response from the ESP":** check `http://scale-reader.local/` answers. If it doesn't, the board is stuck or off the network; power-cycle it, then upload straight away.
 - **"connect failed" in the log:** move the board closer or raise it off the floor. The scale's own signal is weak, and bathroom tile, mirrors and pipes don't help.
-- **The handshake finishes but no weight arrives:** the session gives up after 120 s. Tap the scale and step on when the LED is solid.
+- **"settling" weights in the log but no locked one:** the link is too slow (see *How the scale talks*). If the board connected only after you stepped on, step off and on again once the LED is solid.
 - **`can't resolve raspberrypi.local`:** use the receiver's IP address in `REPORT_HOST`.
 
 ## Privacy and security
